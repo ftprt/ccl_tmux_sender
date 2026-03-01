@@ -1,0 +1,474 @@
+let selectedTarget = null;
+let panes = [];
+let pollTimer = null;
+let promptBadgeShown = {};  // target -> true (tracks which panes already showed the badge animation)
+let captureTimer = null;
+let userScrolledAway = false;
+
+// Detect user scroll: pause auto-scroll when scrolled away from bottom,
+// resume when user scrolls back to the bottom.
+document.getElementById('preview-textarea').addEventListener('scroll', function() {
+  const el = this;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  userScrolledAway = !atBottom;
+});
+
+async function loadPanes() {
+  try {
+    const res = await fetch('/api/panes');
+    const data = await res.json();
+    if (Array.isArray(data)) {
+      panes = data;
+      renderPanes();
+    } else {
+      document.getElementById('pane-grid').innerHTML =
+        '<div class="empty-state">Error: ' + esc(data.error || JSON.stringify(data)) + '</div>';
+    }
+  } catch (e) {
+    document.getElementById('pane-grid').innerHTML =
+      '<div class="empty-state">Failed to load panes: ' + esc(String(e)) + '</div>';
+  }
+}
+
+function renderPanes() {
+  const grid = document.getElementById('pane-grid');
+  if (panes.length === 0) {
+    grid.innerHTML = '<div class="empty-state">No Claude Code panes found.</div>';
+    return;
+  }
+  grid.innerHTML = panes.map(p => `
+    <div class="pane-card ${p.target === selectedTarget ? 'selected' : ''}"
+         onclick="selectPane('${p.target}')">
+      <div class="target">${esc(p.target)}</div>
+      <div class="cwd">${esc(p.cwd)}</div>
+      <div class="meta">
+        <span class="status-dot ${p.status}"></span>
+        <span class="status-label">${p.status}</span>
+        ${p.prompt_waiting ? `<span class="prompt-badge${!promptBadgeShown[p.target] ? ' animate' : ''}">INPUT</span>` : ''}
+      </div>
+      ${p.tokens ? `<div class="token-info">
+        <span>${fmtTokens(p.tokens.input)}&#8593; ${fmtTokens(p.tokens.output)}&#8595;</span>
+        <span>ctx ${p.tokens.ctx_pct.toFixed(0)}%</span>
+        <div class="ctx-bar"><div class="ctx-bar-fill" style="width:${Math.min(p.tokens.ctx_pct, 100).toFixed(0)}%;background:${ctxColor(p.tokens.ctx_pct)}"></div></div>
+      </div>` : ''}
+    </div>
+  `).join('');
+  // Update badge animation tracking
+  panes.forEach(p => {
+    if (p.prompt_waiting) {
+      promptBadgeShown[p.target] = true;
+    } else {
+      delete promptBadgeShown[p.target];  // reset so animation plays again next time
+    }
+  });
+}
+
+function selectPane(target) {
+  selectedTarget = target;
+  renderPanes();
+  document.getElementById('selected-label').innerHTML =
+    'Sending to: <strong>' + esc(target) + '</strong>';
+  document.getElementById('preview-target').textContent = target;
+  document.getElementById('prompt-input').disabled = false;
+  document.getElementById('send-btn').disabled = false;
+  document.querySelectorAll('#quick-buttons .quick-btn').forEach(b => b.disabled = false);
+  document.querySelectorAll('#manual-keys .quick-btn').forEach(b => b.disabled = false);
+  document.getElementById('prompt-input').focus();
+  loadCapture();
+  startCapturePolling();
+}
+
+// --- Pane output capture ---
+async function loadCapture() {
+  if (!selectedTarget) return;
+  try {
+    const res = await fetch('/api/capture?target=' + encodeURIComponent(selectedTarget));
+    const data = await res.json();
+    const textarea = document.getElementById('preview-textarea');
+    const empty = document.getElementById('preview-empty');
+    if (data.ok) {
+      textarea.style.display = '';
+      empty.style.display = 'none';
+      textarea.value = data.content;
+      if (document.getElementById('auto-scroll').checked && !userScrolledAway) {
+        textarea.scrollTop = textarea.scrollHeight;
+      }
+      // Prompt detection
+      const lines = data.content.split('\n');
+      const tail = lines.slice(-30);
+      const detected = detectPrompt(tail);
+      if (detected && (Date.now() - promptActionSentAt > 5000)) {
+        renderPromptActions(detected.options, detected.title);
+      } else {
+        renderPromptActions(null);
+      }
+    } else {
+      textarea.style.display = 'none';
+      empty.style.display = '';
+      empty.textContent = data.error;
+    }
+  } catch (e) {
+    // Silently ignore fetch errors for capture
+  }
+}
+
+function startCapturePolling() {
+  if (captureTimer) clearInterval(captureTimer);
+  captureTimer = setInterval(loadCapture, 2000);
+}
+
+// --- Mode / options ---
+function getSelectedMode() {
+  return document.querySelector('input[name="mode"]:checked').value;
+}
+
+function getSendEnter() {
+  return document.getElementById('send-enter').checked;
+}
+
+const MODE_PREFIX_KEYS = {
+  normal: null,
+  plan: ["BTab"],
+};
+
+async function quickSend(command) {
+  if (!selectedTarget) return;
+  try {
+    const res = await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: selectedTarget, prompt: command, send_enter: true })
+    });
+    const data = await res.json();
+    const btn = document.getElementById('send-btn');
+    if (data.ok) {
+      flashBtn(btn, 'Sent!', 'sent');
+    } else {
+      flashBtn(btn, 'Failed', 'failed');
+    }
+  } catch (e) {
+    const btn = document.getElementById('send-btn');
+    flashBtn(btn, 'Error', 'failed');
+  }
+  setTimeout(loadCapture, 500);
+}
+
+async function sendPrompt() {
+  const input = document.getElementById('prompt-input');
+  const btn = document.getElementById('send-btn');
+  const prompt = input.value.trim();
+
+  if (!selectedTarget || !prompt) return;
+
+  const mode = getSelectedMode();
+  const sendEnter = getSendEnter();
+  const prefixKeys = MODE_PREFIX_KEYS[mode] || null;
+
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+
+  try {
+    const res = await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target: selectedTarget,
+        prompt: prompt,
+        prefix_keys: prefixKeys,
+        send_enter: sendEnter,
+      })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      input.value = '';
+      flashBtn(btn, 'Sent!', 'sent');
+    } else {
+      flashBtn(btn, 'Failed', 'failed');
+    }
+  } catch (e) {
+    flashBtn(btn, 'Error', 'failed');
+  } finally {
+    btn.disabled = false;
+  }
+
+  setTimeout(loadPanes, 1000);
+  setTimeout(loadCapture, 500);
+}
+
+function flashBtn(btn, label, cls) {
+  btn.textContent = label;
+  btn.classList.add(cls);
+  setTimeout(() => {
+    btn.textContent = 'Send';
+    btn.classList.remove(cls);
+  }, 1500);
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function fmtTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function ctxColor(pct) {
+  if (pct >= 80) return 'var(--red)';
+  if (pct >= 50) return 'var(--yellow)';
+  return 'var(--green)';
+}
+
+// Ctrl+Enter / Cmd+Enter to send
+document.getElementById('prompt-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    sendPrompt();
+  }
+});
+
+// --- Prompt detection engine ---
+let promptActionSentAt = 0;
+let promptActionsDismissed = false;
+
+/**
+ * Detect interactive prompts from the tail of captured output.
+ * Returns {title, options: [{num, label, selected, keys}]} or null.
+ */
+function detectPrompt(tailLines) {
+  const tailText = tailLines.join('\n');
+
+  // Primary signal 1: AskUserQuestion / completion menu
+  const hasSelectFooter = tailText.includes('Enter to select');
+  // Primary signal 2: Plan completion prompt
+  const hasPlanFooter = tailText.includes('ctrl-g to edit in VS Code');
+  // Primary signal 3: Tool permission (Allow + Deny)
+  const hasPermission = /\bAllow\b/i.test(tailText) && /\bDeny\b/i.test(tailText);
+  // Primary signal 4: Bash command / tool execution confirmation
+  const hasBashConfirm = tailText.includes('Esc to cancel') && tailText.includes('Tab to amend');
+
+  if (!hasSelectFooter && !hasPlanFooter && !hasPermission && !hasBashConfirm) return null;
+
+  // Regex for numbered option lines (with or without ❯ selector)
+  const optionRe = /^(\s*)(❯\s*)?\s*(\d+)\.\s+(.+)$/;
+
+  // Find the anchor line: the line with ❯ + numbered option
+  let anchorIdx = -1;
+  for (let i = 0; i < tailLines.length; i++) {
+    const m = tailLines[i].match(optionRe);
+    if (m && m[2]) { // m[2] is the ❯ group
+      anchorIdx = i;
+      break;
+    }
+  }
+  if (anchorIdx === -1) return null;
+
+  // Scan BACKWARD from anchor to find the top of the option block.
+  // Walk through option lines, description lines (deeply indented),
+  // and blank lines. Stop at anything else (regular text, separators).
+  let blockStart = anchorIdx;
+  for (let i = anchorIdx - 1; i >= 0; i--) {
+    const line = tailLines[i];
+    if (optionRe.test(line)) {
+      blockStart = i;                  // another option line → extend block
+    } else if (line.trim() === '') {
+      continue;                        // blank line → keep scanning
+    } else if (/^\s{3,}\S/.test(line)) {
+      continue;                        // description line (deeply indented) → keep scanning
+    } else {
+      break;                           // regular text / separator → block boundary
+    }
+  }
+
+  // Forward limit: scan through separators (they are just visual dividers)
+  const blockEnd = Math.min(tailLines.length - 1, anchorIdx + 30);
+
+  // Extract options from blockStart..blockEnd (skip non-option lines)
+  const options = [];
+  let selectedNum = -1;  // track ❯ position by menu number (not filtered index)
+  for (let i = blockStart; i <= blockEnd; i++) {
+    const m = tailLines[i].match(optionRe);
+    if (!m) continue;
+    const isSelected = !!m[2];
+    const num = parseInt(m[3]);
+    const label = m[4].trim();
+    if (isSelected) selectedNum = num;
+    options.push({ num, label, selected: isSelected, keys: [] });
+  }
+
+  if (options.length === 0) return null;
+  // Default selectedNum to first option if ❯ was on a filtered item
+  if (selectedNum === -1) selectedNum = options[0].num;
+
+  // Calculate key sequences using original menu numbers so navigation
+  // is correct even when ❯ sits on a filtered option (e.g. "Type something")
+  for (let i = 0; i < options.length; i++) {
+    const delta = options[i].num - selectedNum;
+    const keys = [];
+    const dir = delta > 0 ? 'Down' : 'Up';
+    for (let j = 0; j < Math.abs(delta); j++) keys.push(dir);
+    keys.push('Enter');
+    options[i].keys = keys;
+  }
+
+  // Build title
+  let title = 'Action needed';
+  if (hasBashConfirm) title = 'Command confirmation';
+  else if (hasPlanFooter) title = 'Plan ready';
+  else if (hasPermission) title = 'Permission needed';
+  else if (hasSelectFooter) title = 'Select an option';
+
+  return { title, options };
+}
+
+/**
+ * Render prompt action buttons or hide the bar.
+ */
+function renderPromptActions(options, title) {
+  const container = document.getElementById('prompt-actions');
+  const btnContainer = document.getElementById('prompt-actions-buttons');
+
+  if (!options || options.length === 0 || promptActionsDismissed) {
+    container.style.display = 'none';
+    return;
+  }
+
+  container.querySelector('.prompt-actions-label span').textContent = '\u26A1 ' + (title || 'Action needed');
+  btnContainer.innerHTML = '';
+
+  options.forEach((opt, idx) => {
+    const btn = document.createElement('button');
+    btn.className = 'prompt-action-btn';
+
+    // Color-code by semantics
+    if (/\b(yes|allow|ok|accept)\b/i.test(opt.label)) btn.classList.add('positive');
+    if (/\b(no|deny|cancel|skip)\b/i.test(opt.label)) btn.classList.add('negative');
+
+    const shortcutNum = idx + 1;
+    btn.innerHTML = esc(opt.label) + ' <span class="shortcut">' + shortcutNum + '</span>';
+    btn.onclick = () => sendPromptAction(opt.keys);
+    btnContainer.appendChild(btn);
+  });
+
+  container.style.display = '';
+  // Reset animation
+  container.style.animation = 'none';
+  container.offsetHeight; // trigger reflow
+  container.style.animation = '';
+  promptActionsDismissed = false;
+}
+
+function dismissPromptActions() {
+  document.getElementById('prompt-actions').style.display = 'none';
+  promptActionsDismissed = true;
+  // Reset dismissed state on next capture change
+  setTimeout(() => { promptActionsDismissed = false; }, 10000);
+}
+
+/**
+ * Send raw key sequence to the selected pane via /api/send-keys.
+ */
+async function sendRawKeys(keys) {
+  if (!selectedTarget || !keys || keys.length === 0) return;
+  try {
+    const res = await fetch('/api/send-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: selectedTarget, keys: keys })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      flashBtn(document.getElementById('send-btn'), 'Sent!', 'sent');
+    } else {
+      flashBtn(document.getElementById('send-btn'), 'Failed', 'failed');
+    }
+  } catch (e) {
+    flashBtn(document.getElementById('send-btn'), 'Error', 'failed');
+  }
+  setTimeout(loadCapture, 500);
+  setTimeout(loadPanes, 1000);
+}
+
+/**
+ * Send prompt action (arrow keys + Enter) and hide the action bar.
+ */
+async function sendPromptAction(keys) {
+  promptActionSentAt = Date.now();
+  document.getElementById('prompt-actions').style.display = 'none';
+  await sendRawKeys(keys);
+}
+
+// Keyboard shortcuts: number keys 1-9 to select prompt action options
+// Only active when prompt actions are visible and textarea is not focused
+document.addEventListener('keydown', function(e) {
+  const actionsBar = document.getElementById('prompt-actions');
+  if (actionsBar.style.display === 'none') return;
+  if (document.activeElement === document.getElementById('prompt-input')) return;
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    dismissPromptActions();
+    return;
+  }
+
+  const num = parseInt(e.key);
+  if (num >= 1 && num <= 9) {
+    const buttons = document.querySelectorAll('#prompt-actions-buttons .prompt-action-btn');
+    if (num <= buttons.length) {
+      e.preventDefault();
+      buttons[num - 1].click();
+    }
+  }
+});
+
+// Portrait resizer: drag to resize between pane output and prompt input
+(function() {
+  const resizer = document.getElementById('v-resizer');
+  const promptSec = document.querySelector('.prompt-section');
+  let dragging = false, startY = 0, startH = 0;
+
+  function isPortrait() { return window.innerHeight > window.innerWidth; }
+
+  function onStart(clientY) {
+    if (!isPortrait()) return;
+    dragging = true;
+    startY = clientY;
+    startH = promptSec.offsetHeight;
+    resizer.classList.add('dragging');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+  }
+  function onMove(clientY) {
+    if (!dragging) return;
+    const delta = startY - clientY; // 上ドラッグ = プロンプトを大きく
+    const newH = Math.max(120, Math.min(window.innerHeight * 0.65, startH + delta));
+    promptSec.style.height = newH + 'px';
+  }
+  function onEnd() {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
+
+  resizer.addEventListener('mousedown', e => { onStart(e.clientY); e.preventDefault(); });
+  document.addEventListener('mousemove', e => onMove(e.clientY));
+  document.addEventListener('mouseup', onEnd);
+
+  resizer.addEventListener('touchstart', e => { onStart(e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+  document.addEventListener('touchmove', e => { if (dragging) { onMove(e.touches[0].clientY); e.preventDefault(); } }, { passive: false });
+  document.addEventListener('touchend', onEnd);
+
+  // 横長に戻ったときインライン height をリセット
+  window.matchMedia('(orientation: portrait)').addEventListener('change', e => {
+    if (!e.matches) promptSec.style.height = '';
+  });
+})();
+
+// Initial load + polling
+loadPanes();
+pollTimer = setInterval(loadPanes, 5000);
