@@ -50,6 +50,15 @@
           <button class="quick-btn" onclick="sendRawKeys(['Down'])" disabled>&darr;</button>
           <button class="quick-btn" onclick="sendRawKeys(['Enter'])" disabled>Enter</button>
         </div>
+        <div id="preset-buttons" class="preset-buttons"></div>
+        <div class="custom-send-row" id="custom-send-row">
+          <input type="text" id="custom-send-input" class="custom-send-input"
+                 placeholder="One-shot send..." disabled />
+          <button class="quick-btn custom-send-btn" id="custom-send-btn"
+                  onclick="customSend()" disabled>Send</button>
+          <button class="quick-btn custom-save-btn" id="custom-save-btn"
+                  onclick="savePreset()" disabled title="Save as preset button">+</button>
+        </div>
       </div>
       <div id="prompt-actions" class="prompt-actions" style="display:none">
         <div class="prompt-actions-label">

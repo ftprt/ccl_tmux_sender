@@ -73,6 +73,8 @@ function selectPane(target) {
   document.getElementById('send-btn').disabled = false;
   document.querySelectorAll('#quick-buttons .quick-btn').forEach(b => b.disabled = false);
   document.querySelectorAll('#manual-keys .quick-btn').forEach(b => b.disabled = false);
+  document.getElementById('custom-send-input').disabled = false;
+  renderPresetButtons();
   document.getElementById('prompt-input').focus();
   loadCapture();
   startCapturePolling();
@@ -153,6 +155,69 @@ async function quickSend(command) {
   setTimeout(loadCapture, 500);
 }
 
+// --- Custom preset buttons ---
+const PRESETS_KEY = 'ccl_presets';
+const RESIZER_KEY = 'ccl_resizer_h';
+function loadPresets() {
+  try { return JSON.parse(localStorage.getItem(PRESETS_KEY)) || []; }
+  catch { return []; }
+}
+function savePresets(presets) {
+  localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+}
+
+function renderPresetButtons() {
+  const container = document.getElementById('preset-buttons');
+  const presets = loadPresets();
+  container.innerHTML = '';
+  presets.forEach(preset => {
+    const wrapper = document.createElement('span');
+    wrapper.className = 'preset-btn-wrapper';
+    const btn = document.createElement('button');
+    btn.className = 'quick-btn preset-btn';
+    btn.textContent = preset.label;
+    btn.title = preset.text;
+    btn.disabled = !selectedTarget;
+    btn.onclick = () => quickSend(preset.text);
+    const rm = document.createElement('button');
+    rm.className = 'preset-remove-btn';
+    rm.textContent = '×';
+    rm.title = 'Remove';
+    rm.onclick = e => { e.stopPropagation(); removePreset(preset.id); };
+    wrapper.appendChild(btn);
+    wrapper.appendChild(rm);
+    container.appendChild(wrapper);
+  });
+}
+
+function removePreset(id) {
+  savePresets(loadPresets().filter(p => p.id !== id));
+  renderPresetButtons();
+}
+
+function savePreset() {
+  const input = document.getElementById('custom-send-input');
+  const text = input.value.trim();
+  if (!text) {
+    input.classList.add('input-error');
+    setTimeout(() => input.classList.remove('input-error'), 800);
+    return;
+  }
+  const presets = loadPresets();
+  if (presets.length >= 3) { alert('Maximum 3 presets reached. Remove one first.'); return; }
+  const label = text.slice(0, 20);
+  presets.push({ id: Date.now().toString(), label, text });
+  savePresets(presets);
+  renderPresetButtons();
+  input.value = '';
+}
+
+function customSend() {
+  const text = document.getElementById('custom-send-input').value.trim();
+  if (!text || !selectedTarget) return;
+  quickSend(text);
+}
+
 async function sendPrompt() {
   const input = document.getElementById('prompt-input');
   const btn = document.getElementById('send-btn');
@@ -230,6 +295,11 @@ document.getElementById('prompt-input').addEventListener('keydown', function(e) 
   }
 });
 
+// Enter to send from custom one-shot input
+document.getElementById('custom-send-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); customSend(); }
+});
+
 // --- Prompt detection engine ---
 let promptActionSentAt = 0;
 let promptActionsDismissed = false;
@@ -249,8 +319,10 @@ function detectPrompt(tailLines) {
   const hasPermission = /\bAllow\b/i.test(tailText) && /\bDeny\b/i.test(tailText);
   // Primary signal 4: Bash command / tool execution confirmation
   const hasBashConfirm = tailText.includes('Esc to cancel') && tailText.includes('Tab to amend');
+  // Primary signal 5: Claude tool/fetch permission dialog ("Claude wants to ..." / "Do you want to allow")
+  const hasClaudeDialog = /Claude wants to\b/i.test(tailText) || /Do you want to allow\b/i.test(tailText);
 
-  if (!hasSelectFooter && !hasPlanFooter && !hasPermission && !hasBashConfirm) return null;
+  if (!hasSelectFooter && !hasPlanFooter && !hasPermission && !hasBashConfirm && !hasClaudeDialog) return null;
 
   // Regex for numbered option lines (with or without ❯ selector)
   const optionRe = /^(\s*)(❯\s*)?\s*(\d+)\.\s+(.+)$/;
@@ -319,6 +391,7 @@ function detectPrompt(tailLines) {
   if (hasBashConfirm) title = 'Command confirmation';
   else if (hasPlanFooter) title = 'Plan ready';
   else if (hasPermission) title = 'Permission needed';
+  else if (hasClaudeDialog) title = 'Permission request';
   else if (hasSelectFooter) title = 'Select an option';
 
   return { title, options };
@@ -453,6 +526,7 @@ document.addEventListener('keydown', function(e) {
     resizer.classList.remove('dragging');
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
+    localStorage.setItem(RESIZER_KEY, String(promptSec.offsetHeight));
   }
 
   resizer.addEventListener('mousedown', e => { onStart(e.clientY); e.preventDefault(); });
@@ -463,12 +537,24 @@ document.addEventListener('keydown', function(e) {
   document.addEventListener('touchmove', e => { if (dragging) { onMove(e.touches[0].clientY); e.preventDefault(); } }, { passive: false });
   document.addEventListener('touchend', onEnd);
 
-  // 横長に戻ったときインライン height をリセット
+  // ページロード時に縦向きの場合、保存済み高さを復元
+  if (isPortrait()) {
+    const savedH = localStorage.getItem(RESIZER_KEY);
+    if (savedH) promptSec.style.height = savedH + 'px';
+  }
+
+  // 向き変更時のリセット・復元
   window.matchMedia('(orientation: portrait)').addEventListener('change', e => {
-    if (!e.matches) promptSec.style.height = '';
+    if (!e.matches) {
+      promptSec.style.height = '';
+    } else {
+      const savedH = localStorage.getItem(RESIZER_KEY);
+      if (savedH) promptSec.style.height = savedH + 'px';
+    }
   });
 })();
 
 // Initial load + polling
 loadPanes();
 pollTimer = setInterval(loadPanes, 5000);
+renderPresetButtons();

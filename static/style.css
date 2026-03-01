@@ -334,6 +334,70 @@
   .manual-keys { display: flex; gap: 4px; }
   .manual-keys .quick-btn { min-width: 32px; text-align: center; }
 
+  /* --- Custom preset buttons --- */
+  .preset-buttons {
+    display: contents; /* flex親の直接子として参加 */
+  }
+  .preset-btn-wrapper {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+  .preset-btn {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .preset-remove-btn {
+    display: none;
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 14px;
+    text-align: center;
+    cursor: pointer;
+    padding: 0;
+    z-index: 1;
+  }
+  .preset-btn-wrapper:hover .preset-remove-btn { display: block; }
+  .preset-remove-btn:hover { background: var(--red); border-color: var(--red); color: #fff; }
+
+  /* --- One-shot custom send row --- */
+  .custom-send-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+  }
+  .custom-send-input {
+    flex: 1;
+    min-width: 80px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 3px 8px;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 14px;
+    height: 26px;
+    transition: border-color 0.15s;
+  }
+  .custom-send-input:focus { outline: none; border-color: var(--accent); }
+  .custom-send-input::placeholder { color: var(--text-dim); }
+  .custom-send-input:disabled { opacity: 0.4; cursor: not-allowed; }
+  .custom-send-input.input-error { border-color: var(--red); }
+  .custom-save-btn { color: var(--green); border-color: var(--green); font-size: 16px; font-weight: 600; }
+  .custom-save-btn:hover { color: #fff; background: var(--green); border-color: var(--green); }
+
   /* Portrait resizer handle */
   .v-resizer {
     display: none;
