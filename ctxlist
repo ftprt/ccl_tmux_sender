@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# ccl_tmux_sender - List tmux panes running Claude Code
+# Usage: ctxlist [--json] [--all]
+
+set -euo pipefail
+
+readonly PROG="$(basename "$0")"
+json_mode=false
+show_all=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --json) json_mode=true ;;
+        --all)  show_all=true ;;
+        -h|--help)
+            echo "Usage: $PROG [--json] [--all]"
+            echo ""
+            echo "List tmux panes running Claude Code."
+            echo ""
+            echo "Options:"
+            echo "  --json   Output as JSON (for ctxserver)"
+            echo "  --all    Show all panes, not just Claude Code"
+            exit 0
+            ;;
+    esac
+done
+
+# --- Determine how to call tmux ---
+tmux_cmd=(tmux)
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        tmux_cmd=(wsl tmux)
+        ;;
+esac
+
+if ! command -v "${tmux_cmd[0]}" &>/dev/null; then
+    echo "$PROG: error: ${tmux_cmd[0]} not found" >&2
+    exit 1
+fi
+
+if ! "${tmux_cmd[@]}" list-sessions &>/dev/null 2>&1; then
+    echo "$PROG: error: no tmux server running" >&2
+    exit 1
+fi
+
+# Format: target|command|cwd|pane_width|pane_height|pane_id
+raw=$("${tmux_cmd[@]}" list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_id}')
+
+# --- Determine idle/busy status ---
+get_status() {
+    local target="$1"
+    local pane_id="$2"
+
+    # Primary: check if ctx-statusline status file was recently updated
+    local status_file="/tmp/ctx-status/${pane_id}.json"
+    if [[ -f "$status_file" ]]; then
+        local mtime now elapsed
+        mtime=$(stat -c %Y "$status_file" 2>/dev/null) || mtime=0
+        now=$(date +%s)
+        elapsed=$((now - mtime))
+        if [[ $elapsed -lt 8 ]]; then
+            echo "busy"
+            return
+        fi
+        echo "idle"
+        return
+    fi
+
+    # Fallback: check last non-empty line for prompt character
+    local captured last_line
+    captured=$("${tmux_cmd[@]}" capture-pane -t "$target" -p -S -20 2>/dev/null || echo "")
+    last_line=$(echo "$captured" | grep -v '^\s*$' | tail -1)
+    if echo "$last_line" | grep -qP '^\s*❯'; then
+        echo "idle"
+    else
+        echo "busy"
+    fi
+}
+
+if $json_mode; then
+    # Collect entries into an array, then output valid JSON
+    entries=()
+    while IFS='|' read -r target cmd cwd width height pane_id; do
+        if ! $show_all; then
+            case "$cmd" in
+                node|claude) ;;
+                *) continue ;;
+            esac
+        fi
+        status=$(get_status "$target" "$pane_id")
+        entries+=("{\"target\":\"$target\",\"command\":\"$cmd\",\"cwd\":\"$cwd\",\"width\":$width,\"height\":$height,\"status\":\"$status\"}")
+    done <<< "$raw"
+
+    echo "["
+    for i in "${!entries[@]}"; do
+        if (( i < ${#entries[@]} - 1 )); then
+            echo "  ${entries[$i]},"
+        else
+            echo "  ${entries[$i]}"
+        fi
+    done
+    echo "]"
+else
+    # Human-readable table
+    printf "%-20s %-10s %-8s %s\n" "TARGET" "COMMAND" "STATUS" "CWD"
+    printf "%-20s %-10s %-8s %s\n" "------" "-------" "------" "---"
+    while IFS='|' read -r target cmd cwd width height pane_id; do
+        if ! $show_all; then
+            case "$cmd" in
+                node|claude) ;;
+                *) continue ;;
+            esac
+        fi
+        status=$(get_status "$target" "$pane_id")
+        printf "%-20s %-10s %-8s %s\n" "$target" "$cmd" "$status" "$cwd"
+    done <<< "$raw"
+fi

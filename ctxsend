@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ccl_tmux_sender - Send a prompt to Claude Code running in a tmux pane
+# Usage: ctxsend <session:window.pane> "prompt text"
+
+set -euo pipefail
+
+readonly PROG="$(basename "$0")"
+
+usage() {
+    cat <<EOF
+Usage: $PROG <target> <prompt>
+
+Send a prompt to a Claude Code CLI running in a tmux pane.
+
+Arguments:
+  target   tmux target pane (session:window.pane, e.g. mysession:0.1)
+  prompt   The prompt text to send
+
+Examples:
+  $PROG hoge:0.0 "hello"
+  $PROG hoge:0.2 "refactor the database module"
+EOF
+    exit 1
+}
+
+err() {
+    echo "$PROG: error: $*" >&2
+    exit 1
+}
+
+# --- Argument validation ---
+[[ $# -ge 2 ]] || usage
+
+target="$1"
+shift
+prompt="$*"
+
+[[ -n "$prompt" ]] || err "prompt cannot be empty"
+
+# --- Determine how to call tmux (native vs WSL bridge) ---
+tmux_cmd=(tmux)
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        tmux_cmd=(wsl tmux)
+        ;;
+esac
+
+# --- Check tmux is available ---
+if ! command -v "${tmux_cmd[0]}" &>/dev/null; then
+    err "${tmux_cmd[0]} is not installed or not in PATH"
+fi
+
+# --- Validate target pane exists ---
+if ! "${tmux_cmd[@]}" list-panes -t "$target" &>/dev/null; then
+    err "pane '$target' does not exist. Use ctxlist to see available panes."
+fi
+
+# --- Send the prompt ---
+# Step 1: Send text literally (-l avoids key name interpretation)
+"${tmux_cmd[@]}" send-keys -t "$target" -l "$prompt"
+# Step 2: Send Enter to submit
+"${tmux_cmd[@]}" send-keys -t "$target" Enter
+
+echo "Sent to $target"

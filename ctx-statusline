@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Claude Code status line script for ccl_tmux_sender.
+
+Receives JSON from Claude Code's status line feature on stdin,
+writes it to /tmp/ctx-status/<TMUX_PANE>.json for ctxserver to read,
+and prints a formatted summary to stdout for the terminal status line.
+
+Setup:
+  Add to ~/.claude/settings.json:
+    {
+      "statusLine": {
+        "type": "command",
+        "command": "/path/to/ctx-statusline"
+      }
+    }
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+STATUS_DIR = Path("/tmp/ctx-status")
+
+
+def main():
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        print("...")
+        return
+
+    # Write full JSON to file keyed by TMUX_PANE (e.g. %0, %1)
+    pane = os.environ.get("TMUX_PANE", "")
+    if pane:
+        STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        status_file = STATUS_DIR / f"{pane}.json"
+        try:
+            with open(status_file, "w") as f:
+                json.dump(data, f)
+        except OSError:
+            pass
+
+    # Format display for Claude Code's terminal status line
+    ctx = data.get("context_window", {})
+    cost = data.get("cost", {})
+    in_t = ctx.get("total_input_tokens", 0)
+    out_t = ctx.get("total_output_tokens", 0)
+    pct = ctx.get("used_percentage", 0)
+    usd = cost.get("total_cost_usd", 0)
+
+    in_k = in_t / 1000
+    out_k = out_t / 1000
+
+    print(f"${usd:.2f} | {in_k:.1f}K in / {out_k:.1f}K out | ctx {pct:.0f}%")
+
+
+if __name__ == "__main__":
+    main()

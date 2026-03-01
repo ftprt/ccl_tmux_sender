@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""ccl_tmux_sender server - Lightweight web server for sending prompts to Claude Code via tmux.
+
+Zero dependencies: uses only Python 3 standard library.
+Run inside WSL where tmux is available.
+
+Usage: python3 ctxserver [--port PORT]
+"""
+
+import http.server
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+
+PORT = 5005
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+CTX_STATUS_DIR = Path("/tmp/ctx-status")
+MAX_ACCUMULATED_LINES = 50000
+
+# Per-pane accumulated output state
+# target -> {"prev": [lines], "acc": [lines]}
+pane_history = {}
+
+
+def run_tmux(*args):
+    """Run a tmux command and return (returncode, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            ["tmux", *args],
+            capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace"
+        )
+        return result.returncode, result.stdout, result.stderr
+    except FileNotFoundError:
+        return 1, "", "tmux not found"
+    except subprocess.TimeoutExpired:
+        return 1, "", "tmux command timed out"
+
+
+def get_panes(show_all=False):
+    """List tmux panes, optionally filtered to Claude Code only."""
+    code, out, err = run_tmux(
+        "list-panes", "-a",
+        "-F", "#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_id}"
+    )
+    if code != 0:
+        return []
+
+    panes = []
+    for line in out.strip().splitlines():
+        parts = line.split("|")
+        if len(parts) != 6:
+            continue
+        target, cmd, cwd, width, height, pane_id = parts
+
+        if not show_all and cmd not in ("node", "claude"):
+            continue
+
+        status = get_pane_status(target, pane_id)
+        tokens = get_pane_token_status(pane_id)
+        prompt_waiting = check_prompt_waiting(target)
+        panes.append({
+            "target": target,
+            "command": cmd,
+            "cwd": cwd,
+            "width": int(width),
+            "height": int(height),
+            "status": status,
+            "tokens": tokens,
+            "prompt_waiting": prompt_waiting,
+        })
+    return panes
+
+
+def get_pane_token_status(pane_id):
+    """Read token/cost status written by the ctx-statusline script."""
+    status_file = CTX_STATUS_DIR / f"{pane_id}.json"
+    try:
+        with open(status_file) as f:
+            data = json.load(f)
+        ctx = data.get("context_window", {})
+        cost = data.get("cost", {})
+        return {
+            "input": ctx.get("total_input_tokens") or 0,
+            "output": ctx.get("total_output_tokens") or 0,
+            "ctx_pct": ctx.get("used_percentage") or 0,
+            "cost_usd": cost.get("total_cost_usd") or 0,
+        }
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+_pane_token_history = {}  # pane_id -> {"tokens": (in, out), "changed_at": float}
+_pane_capture_history = {}  # target -> {"content": str, "changed_at": float}
+_BUSY_GRACE = 8  # seconds: still consider busy after last change
+
+
+def get_pane_status(target, pane_id=None):
+    """Check if a Claude Code pane is idle or busy.
+
+    Uses two complementary signals -- busy if EITHER is active:
+      1. Token change tracking (requires ctx-statusline)
+      2. Pane capture change tracking (screen content diff)
+    """
+    # Signal 1: token consumption changes
+    token_result = None
+    if pane_id:
+        token_result = _check_token_activity(pane_id)
+
+    # Signal 2: screen content changes
+    capture_result = _check_pane_capture(target)
+
+    # Busy if either signal indicates activity
+    if token_result == "busy" or capture_result == "busy":
+        return "busy"
+    if token_result == "idle" or capture_result == "idle":
+        return "idle"
+    return capture_result  # "unknown" from capture failure
+
+
+def _check_token_activity(pane_id):
+    """Detect activity by comparing token counts with previous poll."""
+    tokens = get_pane_token_status(pane_id)
+    if not tokens:
+        return None  # no data
+
+    current = (tokens["input"], tokens["output"])
+    now = time.time()
+    prev = _pane_token_history.get(pane_id)
+
+    if prev is None:
+        _pane_token_history[pane_id] = {"tokens": current, "changed_at": now}
+        return None  # first observation
+
+    if current != prev["tokens"]:
+        _pane_token_history[pane_id] = {"tokens": current, "changed_at": now}
+        return "busy"
+
+    elapsed = now - prev["changed_at"]
+    if elapsed < _BUSY_GRACE:
+        return "busy"
+    return "idle"
+
+
+def _check_pane_capture(target):
+    """Detect activity by comparing pane content with previous capture."""
+    code, out, _ = run_tmux("capture-pane", "-t", target, "-p", "-S", "-20")
+    if code != 0:
+        return "unknown"
+
+    now = time.time()
+    prev = _pane_capture_history.get(target)
+
+    if prev is None:
+        # First observation -- use prompt character as initial hint
+        _pane_capture_history[target] = {"content": out, "changed_at": now}
+        lines = [l for l in out.splitlines() if l.strip()]
+        if lines and lines[-1].strip().startswith("\u276f"):
+            return "idle"
+        return "busy"
+
+    if out != prev["content"]:
+        # Screen content changed since last poll -> busy
+        _pane_capture_history[target] = {"content": out, "changed_at": now}
+        return "busy"
+
+    # Content unchanged -- check grace period
+    elapsed = now - prev["changed_at"]
+    if elapsed < _BUSY_GRACE:
+        return "busy"
+    return "idle"
+
+
+def check_prompt_waiting(target):
+    """Check if a pane is showing an interactive prompt awaiting user input.
+
+    Uses the content already captured by _check_pane_capture() (called from
+    get_pane_status) so this adds no extra tmux calls.
+    """
+    prev = _pane_capture_history.get(target)
+    if not prev:
+        return False
+    content = prev["content"]
+    # Prompt footer signals (same patterns as the JS detectPrompt)
+    if "Enter to select" in content:
+        return True
+    if "ctrl-g to edit in VS Code" in content:
+        return True
+    if "Esc to cancel" in content and "Tab to amend" in content:
+        return True
+    return False
+
+
+def get_accumulated_capture(target):
+    """Capture pane output with full scrollback, accumulating history over time.
+
+    On each call, compares the new capture with the previous one:
+    - Lines that match from the start (common prefix) are stable history.
+    - Lines that differ at the end are new output or in-place updates.
+    The accumulated buffer grows as new output appears, and in-place
+    updates (e.g. Claude Code progress display) replace only the
+    changing tail portion.
+    """
+    code, out, err = run_tmux("capture-pane", "-S", "-", "-t", target, "-p", "-J")
+    if code != 0:
+        return None, f"capture failed: {err}"
+
+    new_lines = out.split("\n")
+
+    if target not in pane_history:
+        pane_history[target] = {"prev": new_lines, "acc": list(new_lines)}
+        return "\n".join(new_lines), None
+
+    state = pane_history[target]
+    prev = state["prev"]
+    acc = state["acc"]
+
+    # Find common prefix between previous capture and new capture
+    common = 0
+    limit = min(len(prev), len(new_lines))
+    while common < limit and prev[common] == new_lines[common]:
+        common += 1
+
+    # accumulated layout: [history older than prev] + [prev lines]
+    # Keep history + stable common prefix, then append new divergent lines
+    keep = len(acc) - len(prev) + common
+    if keep < 0:
+        keep = 0
+    new_acc = acc[:keep] + new_lines[common:]
+
+    # Cap to prevent unbounded memory growth
+    if len(new_acc) > MAX_ACCUMULATED_LINES:
+        new_acc = new_acc[-MAX_ACCUMULATED_LINES:]
+
+    state["prev"] = new_lines
+    state["acc"] = new_acc
+
+    return "\n".join(new_acc), None
+
+
+def send_keys_raw(target, *keys):
+    """Send raw tmux key names (e.g. 'Enter', 'S-Tab') to a pane."""
+    return run_tmux("send-keys", "-t", target, *keys)
+
+
+def _paste_to_pane(target, text):
+    """Send text to a pane using tmux paste-buffer with bracketed paste.
+
+    More reliable than send-keys for multi-line text because it avoids
+    the S-Enter key name which some tmux/terminal combinations don't
+    recognise (resulting in literal "S-Enter" being typed).
+    Bracketed paste (-p) tells the TUI app to treat the pasted content
+    as a block, preserving newlines without triggering submission.
+    """
+    try:
+        result = subprocess.run(
+            ["tmux", "load-buffer", "-"],
+            input=text, capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace"
+        )
+        if result.returncode != 0:
+            return False, f"load-buffer failed: {result.stderr}"
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False, f"load-buffer error: {e}"
+
+    code, _, err = run_tmux("paste-buffer", "-d", "-p", "-t", target)
+    if code != 0:
+        return False, f"paste-buffer failed: {err}"
+    return True, "Pasted"
+
+
+def send_prompt(target, prompt, prefix_keys=None, send_enter=True):
+    """Send a prompt to a tmux pane running Claude Code."""
+    # Validate target exists
+    code, _, _ = run_tmux("list-panes", "-t", target)
+    if code != 0:
+        return False, f"Pane '{target}' does not exist"
+
+    # Send prefix keys (e.g. Shift+Tab for plan mode toggle)
+    if prefix_keys:
+        for key in prefix_keys:
+            code, _, err = send_keys_raw(target, key)
+            if code != 0:
+                return False, f"Failed to send prefix key '{key}': {err}"
+        # Brief pause to let Claude Code process the key
+        time.sleep(0.3)
+
+    # Send text to the pane
+    has_newline = "\n" in prompt
+    if has_newline:
+        # Multi-line: use paste-buffer with bracketed paste (-p) for
+        # reliable newline handling (avoids S-Enter issues).
+        ok, msg = _paste_to_pane(target, prompt)
+        if not ok:
+            return False, msg
+    else:
+        # Single line: simple literal send
+        if prompt:
+            code, _, err = run_tmux("send-keys", "-t", target, "-l", prompt)
+            if code != 0:
+                return False, f"Failed to send text: {err}"
+
+    # Send Enter to submit (optional)
+    if send_enter:
+        if has_newline:
+            time.sleep(0.3)
+        code, _, err = run_tmux("send-keys", "-t", target, "Enter")
+        if code != 0:
+            return False, f"Failed to send Enter: {err}"
+
+    return True, "Sent"
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+
+        if parsed.path == "/api/panes":
+            try:
+                self._json_response(get_panes())
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self._json_response({"ok": False, "error": str(e)}, 500)
+            return
+
+        if parsed.path == "/api/capture":
+            qs = urllib.parse.parse_qs(parsed.query)
+            target = qs.get("target", [""])[0].strip()
+            if not target:
+                self._json_response({"ok": False, "error": "target is required"}, 400)
+                return
+            content, error = get_accumulated_capture(target)
+            if error:
+                self._json_response({"ok": False, "error": error}, 400)
+                return
+            self._json_response({"ok": True, "content": content})
+            return
+
+        # Serve static files
+        if parsed.path == "/" or parsed.path == "":
+            filepath = STATIC_DIR / "index.html"
+        else:
+            # Sanitize path to prevent directory traversal
+            rel = parsed.path.lstrip("/")
+            filepath = (STATIC_DIR / rel).resolve()
+            if not str(filepath).startswith(str(STATIC_DIR)):
+                self.send_error(403)
+                return
+
+        if filepath.is_file():
+            self._serve_file(filepath)
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+
+        if parsed.path == "/api/send":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._json_response({"ok": False, "error": "Invalid JSON"}, 400)
+                return
+
+            target = data.get("target", "").strip()
+            prompt = data.get("prompt", "").strip()
+            prefix_keys = data.get("prefix_keys", None)  # e.g. ["S-Tab"]
+            send_enter = data.get("send_enter", True)
+
+            if not target:
+                self._json_response({"ok": False, "error": "target is required"}, 400)
+                return
+            if not prompt:
+                self._json_response({"ok": False, "error": "prompt is required"}, 400)
+                return
+
+            # Validate prefix_keys is a list of strings if provided
+            if prefix_keys is not None:
+                if not isinstance(prefix_keys, list) or not all(isinstance(k, str) for k in prefix_keys):
+                    self._json_response({"ok": False, "error": "prefix_keys must be a list of strings"}, 400)
+                    return
+
+            ok, msg = send_prompt(target, prompt, prefix_keys=prefix_keys, send_enter=send_enter)
+            status = 200 if ok else 400
+            self._json_response({"ok": ok, "message": msg}, status)
+            return
+
+        if parsed.path == "/api/send-keys":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._json_response({"ok": False, "error": "Invalid JSON"}, 400)
+                return
+
+            target = data.get("target", "").strip()
+            keys = data.get("keys", [])
+
+            if not target:
+                self._json_response({"ok": False, "error": "target is required"}, 400)
+                return
+            if not isinstance(keys, list) or not keys:
+                self._json_response({"ok": False, "error": "keys must be a non-empty list"}, 400)
+                return
+
+            # Whitelist of allowed key names to prevent injection
+            ALLOWED_KEYS = {
+                "Enter", "Escape", "Up", "Down", "Left", "Right",
+                "Tab", "BTab", "Space",
+                "y", "n", "a", "d",
+                "1", "2", "3", "4", "5", "6", "7", "8", "9",
+            }
+            for k in keys:
+                if not isinstance(k, str) or k not in ALLOWED_KEYS:
+                    self._json_response({"ok": False, "error": f"Invalid key: {k!r}"}, 400)
+                    return
+
+            # Validate target exists
+            code, _, _ = run_tmux("list-panes", "-t", target)
+            if code != 0:
+                self._json_response({"ok": False, "error": f"Pane '{target}' does not exist"}, 400)
+                return
+
+            # Send each key with a small delay for TUI processing
+            for i, key in enumerate(keys):
+                code, _, err = send_keys_raw(target, key)
+                if code != 0:
+                    self._json_response({"ok": False, "error": f"Failed to send key '{key}': {err}"}, 500)
+                    return
+                if i < len(keys) - 1:
+                    time.sleep(0.05)
+
+            self._json_response({"ok": True, "message": f"Sent {len(keys)} key(s)"})
+            return
+
+        self.send_error(404)
+
+    def _json_response(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_file(self, filepath):
+        ext = filepath.suffix.lower()
+        content_types = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".ico": "image/x-icon",
+        }
+        ctype = content_types.get(ext, "application/octet-stream")
+        try:
+            data = filepath.read_bytes()
+        except OSError:
+            self.send_error(500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_request(self, code="-", size="-"):
+        # Only log errors (4xx, 5xx)
+        if isinstance(code, int) and code >= 400:
+            self.log_message('"%s" %s %s', self.requestline, str(code), str(size))
+
+    def log_message(self, format, *args):
+        sys.stderr.write(f"[ctxserver] {self.address_string()} - {format % args}\n")
+
+
+def main():
+    port = PORT
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg in ("--port", "-p") and i < len(sys.argv) - 1:
+            port = int(sys.argv[i + 1])
+        elif arg in ("-h", "--help"):
+            print(f"Usage: {sys.argv[0]} [--port PORT]")
+            print(f"Default port: {PORT}")
+            sys.exit(0)
+
+    server = http.server.HTTPServer(("0.0.0.0", port), Handler)
+    print(f"[ctxserver] Open http://localhost:{port} in your browser")
+    print(f"[ctxserver] Press Ctrl+C to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[ctxserver] Stopped")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
