@@ -3,14 +3,17 @@ let panes = [];
 let pollTimer = null;
 let promptBadgeShown = {};  // target -> true (tracks which panes already showed the badge animation)
 let captureTimer = null;
-let userScrolledAway = false;
+const paneScrollState = {};  // { [target]: { scrollTop, userScrolledAway } }
 
 // Detect user scroll: pause auto-scroll when scrolled away from bottom,
-// resume when user scrolls back to the bottom.
+// resume when user scrolls back to the bottom. Save state per pane.
 document.getElementById('preview-textarea').addEventListener('scroll', function() {
+  if (!selectedTarget) return;
   const el = this;
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  userScrolledAway = !atBottom;
+  if (!paneScrollState[selectedTarget]) paneScrollState[selectedTarget] = {};
+  paneScrollState[selectedTarget].scrollTop = el.scrollTop;
+  paneScrollState[selectedTarget].userScrolledAway = !atBottom;
 });
 
 async function loadPanes() {
@@ -64,6 +67,14 @@ function renderPanes() {
 }
 
 function selectPane(target) {
+  // 切り替え前のペインのスクロール位置を保存
+  if (selectedTarget) {
+    const textarea = document.getElementById('preview-textarea');
+    if (!paneScrollState[selectedTarget]) paneScrollState[selectedTarget] = {};
+    paneScrollState[selectedTarget].scrollTop = textarea.scrollTop;
+    const atBottom = textarea.scrollHeight - textarea.scrollTop - textarea.clientHeight < 30;
+    paneScrollState[selectedTarget].userScrolledAway = !atBottom;
+  }
   selectedTarget = target;
   renderPanes();
   document.getElementById('selected-label').innerHTML =
@@ -92,8 +103,11 @@ async function loadCapture() {
       textarea.style.display = '';
       empty.style.display = 'none';
       textarea.value = data.content;
-      if (document.getElementById('auto-scroll').checked && !userScrolledAway) {
+      const state = paneScrollState[selectedTarget] || {};
+      if (document.getElementById('auto-scroll').checked && !state.userScrolledAway) {
         textarea.scrollTop = textarea.scrollHeight;
+      } else if (state.scrollTop !== undefined) {
+        textarea.scrollTop = state.scrollTop;
       }
       // Prompt detection
       const lines = data.content.split('\n');
