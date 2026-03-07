@@ -218,7 +218,7 @@ function savePreset() {
     return;
   }
   const presets = loadPresets();
-  if (presets.length >= 3) { alert('Maximum 3 presets reached. Remove one first.'); return; }
+  if (presets.length >= 20) { alert('Maximum 20 presets reached. Remove one first.'); return; }
   const label = text.slice(0, 20);
   presets.push({ id: Date.now().toString(), label, text });
   savePresets(presets);
