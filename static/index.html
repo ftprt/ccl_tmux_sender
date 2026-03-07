@@ -3,13 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#161b22">
 <title>ccl_tmux_sender</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="manifest" href="/manifest.json">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <header>
   <h1>ccl_tmux_sender</h1>
+  <button id="pwa-install-btn" class="install-btn" style="display:none">Install App</button>
+  <button id="touch-mode-btn" class="touch-mode-btn" onclick="toggleTouchMode()">Touch</button>
   <button class="refresh-btn" onclick="loadPanes()">Refresh</button>
 </header>
 

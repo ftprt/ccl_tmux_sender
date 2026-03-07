@@ -568,7 +568,45 @@ document.addEventListener('keydown', function(e) {
   });
 })();
 
+// PWA install button
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  document.getElementById('pwa-install-btn').style.display = '';
+});
+document.getElementById('pwa-install-btn').addEventListener('click', async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const { outcome } = await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  if (outcome === 'accepted') {
+    document.getElementById('pwa-install-btn').style.display = 'none';
+  }
+});
+window.addEventListener('appinstalled', () => {
+  document.getElementById('pwa-install-btn').style.display = 'none';
+});
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
+
+// Touch mode toggle
+const TOUCH_MODE_KEY = 'ccl_touch_mode';
+function initTouchMode() {
+  if (localStorage.getItem(TOUCH_MODE_KEY) === '1') {
+    document.body.classList.add('touch-mode');
+    document.getElementById('touch-mode-btn').textContent = 'Normal';
+  }
+}
+function toggleTouchMode() {
+  const enabled = document.body.classList.toggle('touch-mode');
+  localStorage.setItem(TOUCH_MODE_KEY, enabled ? '1' : '0');
+  document.getElementById('touch-mode-btn').textContent = enabled ? 'Normal' : 'Touch';
+}
+
 // Initial load + polling
+initTouchMode();
 loadPanes();
 pollTimer = setInterval(loadPanes, 5000);
 renderPresetButtons();
