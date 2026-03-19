@@ -300,7 +300,7 @@ def send_prompt(target, prompt, prefix_keys=None, send_enter=True):
     else:
         # Single line: simple literal send
         if prompt:
-            code, _, err = run_tmux("send-keys", "-t", target, "-l", prompt)
+            code, _, err = run_tmux("send-keys", "-t", target, "-l", "--", prompt)
             if code != 0:
                 return False, f"Failed to send text: {err}"
 
