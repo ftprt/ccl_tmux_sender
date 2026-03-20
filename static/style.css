@@ -52,6 +52,44 @@
   header .install-btn:hover { background: var(--accent); color: var(--bg); }
   header .install-btn + .refresh-btn { margin-left: 0; }
 
+  /* Rate limits display */
+  .rate-limits {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: 16px;
+  }
+  .rate-limits:empty { display: none; }
+  .rl-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .rl-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-weight: 500;
+    min-width: 18px;
+  }
+  .rl-bar {
+    width: 60px;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .rl-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  .rl-pct {
+    font-size: 12px;
+    color: var(--text-dim);
+    min-width: 28px;
+    text-align: right;
+  }
+
   /* Two-column layout */
   .main { flex: 1; display: flex; overflow: hidden; }
   .left-panel {

@@ -53,7 +53,20 @@ def main():
     in_k = in_t / 1000
     out_k = out_t / 1000
 
-    print(f"${usd:.2f} | {in_k:.1f}K in / {out_k:.1f}K out | ctx {pct:.0f}%")
+    parts = [f"${usd:.2f} | {in_k:.1f}K in / {out_k:.1f}K out | ctx {pct:.0f}%"]
+
+    rl = data.get("rate_limits", {})
+    five = rl.get("five_hour", {})
+    seven = rl.get("seven_day", {})
+    if five or seven:
+        rl_parts = []
+        if five:
+            rl_parts.append(f"5h {five.get('used_percentage', 0):.0f}%")
+        if seven:
+            rl_parts.append(f"7d {seven.get('used_percentage', 0):.0f}%")
+        parts.append(" | ".join(rl_parts))
+
+    print(" | ".join(parts))
 
 
 if __name__ == "__main__":

@@ -94,6 +94,30 @@ def get_pane_token_status(pane_id):
         return None
 
 
+def get_rate_limits():
+    """Read rate_limits from any available pane status file (account-level data)."""
+    try:
+        for status_file in CTX_STATUS_DIR.glob("*.json"):
+            try:
+                with open(status_file) as f:
+                    data = json.load(f)
+                rl = data.get("rate_limits")
+                if rl:
+                    five = rl.get("five_hour", {})
+                    seven = rl.get("seven_day", {})
+                    return {
+                        "five_hour": five.get("used_percentage", 0),
+                        "five_hour_resets_at": five.get("resets_at", ""),
+                        "seven_day": seven.get("used_percentage", 0),
+                        "seven_day_resets_at": seven.get("resets_at", ""),
+                    }
+            except (json.JSONDecodeError, OSError):
+                continue
+    except OSError:
+        pass
+    return None
+
+
 _pane_token_history = {}  # pane_id -> {"tokens": (in, out), "changed_at": float}
 _pane_capture_history = {}  # target -> {"content": str, "changed_at": float}
 _BUSY_GRACE = 8  # seconds: still consider busy after last change
@@ -321,7 +345,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if parsed.path == "/api/panes":
             try:
-                self._json_response(get_panes())
+                self._json_response({
+                    "panes": get_panes(),
+                    "rate_limits": get_rate_limits(),
+                })
             except Exception as e:
                 import traceback
                 traceback.print_exc()

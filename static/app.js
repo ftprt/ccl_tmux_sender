@@ -23,6 +23,10 @@ async function loadPanes() {
     if (Array.isArray(data)) {
       panes = data;
       renderPanes();
+    } else if (data.panes) {
+      panes = data.panes;
+      renderPanes();
+      renderRateLimits(data.rate_limits);
     } else {
       document.getElementById('pane-grid').innerHTML =
         '<div class="empty-state">Error: ' + esc(data.error || JSON.stringify(data)) + '</div>';
@@ -299,6 +303,23 @@ function ctxColor(pct) {
   if (pct >= 80) return 'var(--red)';
   if (pct >= 50) return 'var(--yellow)';
   return 'var(--green)';
+}
+
+function renderRateLimits(rl) {
+  const el = document.getElementById('rate-limits');
+  if (!el) return;
+  if (!rl) { el.innerHTML = ''; return; }
+  const items = [
+    { label: '5h', pct: rl.five_hour || 0 },
+    { label: '7d', pct: rl.seven_day || 0 },
+  ];
+  el.innerHTML = items.map(i => `
+    <div class="rl-item">
+      <span class="rl-label">${i.label}</span>
+      <div class="rl-bar"><div class="rl-bar-fill" style="width:${Math.min(i.pct, 100).toFixed(0)}%;background:${ctxColor(i.pct)}"></div></div>
+      <span class="rl-pct">${i.pct.toFixed(0)}%</span>
+    </div>
+  `).join('');
 }
 
 // Ctrl+Enter / Cmd+Enter to send
