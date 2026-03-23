@@ -14,7 +14,17 @@ document.getElementById('preview-textarea').addEventListener('scroll', function(
   if (!paneScrollState[selectedTarget]) paneScrollState[selectedTarget] = {};
   paneScrollState[selectedTarget].scrollTop = el.scrollTop;
   paneScrollState[selectedTarget].userScrolledAway = !atBottom;
+  document.getElementById('scroll-to-bottom-btn').style.display = atBottom ? 'none' : 'flex';
 });
+
+function scrollToBottom() {
+  const textarea = document.getElementById('preview-textarea');
+  textarea.scrollTop = textarea.scrollHeight;
+  if (selectedTarget && paneScrollState[selectedTarget]) {
+    paneScrollState[selectedTarget].userScrolledAway = false;
+  }
+  document.getElementById('scroll-to-bottom-btn').style.display = 'none';
+}
 
 async function loadPanes() {
   try {
