@@ -479,10 +479,13 @@ function renderPromptActions(options, title) {
   });
 
   container.style.display = '';
-  // Reset animation
-  container.style.animation = 'none';
-  container.offsetHeight; // trigger reflow
-  container.style.animation = '';
+  // Restart animation without forced reflow — use rAF double-frame
+  container.classList.remove('pulse');
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      container.classList.add('pulse');
+    });
+  });
   promptActionsDismissed = false;
 }
 
