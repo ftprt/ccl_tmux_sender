@@ -2,6 +2,7 @@ let selectedTarget = null;
 let panes = [];
 let pollTimer = null;
 let promptBadgeShown = {};  // target -> true (tracks which panes already showed the badge animation)
+let lastPromptActionsKey = '';  // diff key to skip redundant DOM updates
 let captureTimer = null;
 const paneScrollState = {};  // { [target]: { scrollTop, userScrolledAway } }
 
@@ -451,8 +452,14 @@ function renderPromptActions(options, title) {
 
   if (!options || options.length === 0 || promptActionsDismissed) {
     container.style.display = 'none';
+    lastPromptActionsKey = '';
     return;
   }
+
+  // Skip redundant DOM rebuild if options haven't changed
+  const key = (title || '') + '|' + options.map(o => o.label).join('|');
+  if (key === lastPromptActionsKey) return;
+  lastPromptActionsKey = key;
 
   container.querySelector('.prompt-actions-label span').textContent = '\u26A1 ' + (title || 'Action needed');
   btnContainer.innerHTML = '';
@@ -550,6 +557,9 @@ document.addEventListener('keydown', function(e) {
 
   function isPortrait() { return window.innerHeight > window.innerWidth; }
 
+  function handleMouseMove(e) { onMove(e.clientY); }
+  function handleMouseUp() { onEnd(); document.removeEventListener('mousemove', handleMouseMove); document.removeEventListener('mouseup', handleMouseUp); }
+
   function onStart(clientY) {
     if (!isPortrait()) return;
     dragging = true;
@@ -558,6 +568,8 @@ document.addEventListener('keydown', function(e) {
     resizer.classList.add('dragging');
     document.body.style.cursor = 'ns-resize';
     document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
   }
   function onMove(clientY) {
     if (!dragging) return;
@@ -575,8 +587,6 @@ document.addEventListener('keydown', function(e) {
   }
 
   resizer.addEventListener('mousedown', e => { onStart(e.clientY); e.preventDefault(); });
-  document.addEventListener('mousemove', e => onMove(e.clientY));
-  document.addEventListener('mouseup', onEnd);
 
   resizer.addEventListener('touchstart', e => { onStart(e.touches[0].clientY); e.preventDefault(); }, { passive: false });
   document.addEventListener('touchmove', e => { if (dragging) { onMove(e.touches[0].clientY); e.preventDefault(); } }, { passive: false });
