@@ -91,6 +91,7 @@ function selectPane(target) {
     paneScrollState[selectedTarget].userScrolledAway = !atBottom;
   }
   selectedTarget = target;
+  currentClaudeMode = 'normal';
   renderPanes();
   document.getElementById('selected-label').innerHTML =
     'Sending to: <strong>' + esc(target) + '</strong>';
@@ -157,10 +158,17 @@ function getSendEnter() {
   return document.getElementById('send-enter').checked;
 }
 
-const MODE_PREFIX_KEYS = {
-  normal: null,
-  plan: ["BTab"],
-};
+// Mode cycle order matches Claude Code's Shift+Tab cycle:
+// Default(normal) → AcceptEdits → Plan → Default
+const MODE_CYCLE = ['normal', 'acceptEdits', 'plan'];
+let currentClaudeMode = 'normal';
+
+function getBTabCount(fromMode, toMode) {
+  const from = MODE_CYCLE.indexOf(fromMode);
+  const to   = MODE_CYCLE.indexOf(toMode);
+  if (from === to) return 0;
+  return (to - from + MODE_CYCLE.length) % MODE_CYCLE.length;
+}
 
 async function quickSend(command) {
   if (!selectedTarget) return;
@@ -256,7 +264,9 @@ async function sendPrompt() {
 
   const mode = getSelectedMode();
   const sendEnter = getSendEnter();
-  const prefixKeys = MODE_PREFIX_KEYS[mode] || null;
+  const targetMode = mode === 'plan' ? 'plan' : 'normal';
+  const count = getBTabCount(currentClaudeMode, targetMode);
+  const prefixKeys = count > 0 ? Array(count).fill('BTab') : null;
 
   btn.disabled = true;
   btn.textContent = 'Sending...';
@@ -274,6 +284,7 @@ async function sendPrompt() {
     });
     const data = await res.json();
     if (data.ok) {
+      currentClaudeMode = targetMode;
       input.value = '';
       flashBtn(btn, 'Sent!', 'sent');
     } else {
