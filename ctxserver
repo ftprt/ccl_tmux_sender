@@ -271,6 +271,38 @@ def send_keys_raw(target, *keys):
     return run_tmux("send-keys", "-t", target, *keys)
 
 
+# Claude Code mode cycle order (Shift+Tab / BTab cycles forward)
+MODE_CYCLE = ['normal', 'acceptEdits', 'plan']
+
+def detect_claude_mode(target):
+    """現在の visible screen を capture して Claude Code のモードを検出する。
+
+    スクロールバックは読まず可視画面のみ（-S - なし）。
+    Returns: 'plan' | 'acceptEdits' | 'normal'
+    """
+    code, out, _ = run_tmux("capture-pane", "-t", target, "-p", "-J")
+    if code != 0:
+        return 'normal'
+    lines = out.splitlines()
+    tail = '\n'.join(lines[-10:])
+    if '\u23f8 plan mode on' in tail:  # ⏸ plan mode on
+        return 'plan'
+    # AcceptEdits の表示文字列が判明したらここに追加
+    return 'normal'
+
+
+def get_btab_count(from_mode, to_mode):
+    """from_mode → to_mode に移るために必要な BTab 回数を返す。"""
+    try:
+        frm = MODE_CYCLE.index(from_mode)
+        to  = MODE_CYCLE.index(to_mode)
+    except ValueError:
+        return 0
+    if frm == to:
+        return 0
+    return (to - frm + len(MODE_CYCLE)) % len(MODE_CYCLE)
+
+
 def _paste_to_pane(target, text):
     """Send text to a pane using tmux paste-buffer with bracketed paste.
 
@@ -297,20 +329,36 @@ def _paste_to_pane(target, text):
     return True, "Pasted"
 
 
-def send_prompt(target, prompt, prefix_keys=None, send_enter=True):
-    """Send a prompt to a tmux pane running Claude Code."""
+def send_prompt(target, prompt, prefix_keys=None, send_enter=True, target_mode=None):
+    """Send a prompt to a tmux pane running Claude Code.
+
+    Mode switching (pick one; target_mode takes priority):
+      target_mode: 'normal' | 'plan' | 'acceptEdits'
+          サーバーが現在モードを capture で実測し、必要な BTab 回数を計算して送信する。
+      prefix_keys: list of tmux key names (後方互換・手動制御用)
+    """
     # Validate target exists
     code, _, _ = run_tmux("list-panes", "-t", target)
     if code != 0:
         return False, f"Pane '{target}' does not exist"
 
-    # Send prefix keys (e.g. Shift+Tab for plan mode toggle)
-    if prefix_keys:
+    # Mode switching
+    if target_mode is not None:
+        current = detect_claude_mode(target)
+        count = get_btab_count(current, target_mode)
+        if count > 0:
+            for _ in range(count):
+                code, _, err = send_keys_raw(target, "BTab")
+                if code != 0:
+                    return False, f"Failed to send BTab: {err}"
+            # Brief pause to let Claude Code process the mode toggle
+            time.sleep(0.3)
+    elif prefix_keys:
+        # 後方互換: caller-supplied prefix keys をそのまま送信
         for key in prefix_keys:
             code, _, err = send_keys_raw(target, key)
             if code != 0:
                 return False, f"Failed to send prefix key '{key}': {err}"
-        # Brief pause to let Claude Code process the key
         time.sleep(0.3)
 
     # Send text to the pane
@@ -400,6 +448,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             prompt = data.get("prompt", "").strip()
             prefix_keys = data.get("prefix_keys", None)  # e.g. ["S-Tab"]
             send_enter = data.get("send_enter", True)
+            target_mode = data.get("target_mode", None)  # 'normal' | 'plan'
 
             if not target:
                 self._json_response({"ok": False, "error": "target is required"}, 400)
@@ -414,7 +463,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._json_response({"ok": False, "error": "prefix_keys must be a list of strings"}, 400)
                     return
 
-            ok, msg = send_prompt(target, prompt, prefix_keys=prefix_keys, send_enter=send_enter)
+            # Validate target_mode if provided
+            if target_mode is not None and target_mode not in MODE_CYCLE:
+                self._json_response({"ok": False, "error": f"target_mode must be one of {MODE_CYCLE}"}, 400)
+                return
+
+            ok, msg = send_prompt(target, prompt, prefix_keys=prefix_keys,
+                                  send_enter=send_enter, target_mode=target_mode)
             status = 200 if ok else 400
             self._json_response({"ok": ok, "message": msg}, status)
             return
