@@ -128,10 +128,16 @@ async function loadCapture() {
       const lines = data.content.split('\n');
       const tail = lines.slice(-30);
       const detected = detectPrompt(tail);
-      if (detected && (Date.now() - promptActionSentAt > 5000)) {
-        renderPromptActions(detected.options, detected.title);
-      } else {
+      if (!detected) {
+        promptActionSuppressedKey = '';   // options scrolled out of view — lift suppression
         renderPromptActions(null);
+      } else {
+        const detectedKey = (detected.title || '') + '|' + detected.options.map(o => o.label).join('|');
+        if (detectedKey === promptActionSuppressedKey) {
+          renderPromptActions(null);      // stale options already acted on — keep hidden
+        } else {
+          renderPromptActions(detected.options, detected.title);
+        }
       }
     } else {
       textarea.style.display = 'none';
@@ -341,8 +347,7 @@ document.getElementById('custom-send-input').addEventListener('keydown', functio
 });
 
 // --- Prompt detection engine ---
-let promptActionSentAt = 0;
-let promptActionsDismissed = false;
+let promptActionSuppressedKey = '';  // fingerprint of actioned/dismissed options
 
 /**
  * Detect interactive prompts from the tail of captured output.
@@ -444,7 +449,7 @@ function renderPromptActions(options, title) {
   const container = document.getElementById('prompt-actions');
   const btnContainer = document.getElementById('prompt-actions-buttons');
 
-  if (!options || options.length === 0 || promptActionsDismissed) {
+  if (!options || options.length === 0) {
     container.style.display = 'none';
     lastPromptActionsKey = '';
     return;
@@ -480,14 +485,11 @@ function renderPromptActions(options, title) {
       container.classList.add('pulse');
     });
   });
-  promptActionsDismissed = false;
 }
 
 function dismissPromptActions() {
   document.getElementById('prompt-actions').style.display = 'none';
-  promptActionsDismissed = true;
-  // Reset dismissed state on next capture change
-  setTimeout(() => { promptActionsDismissed = false; }, 10000);
+  promptActionSuppressedKey = lastPromptActionsKey;
 }
 
 /**
@@ -518,7 +520,7 @@ async function sendRawKeys(keys) {
  * Send prompt action (arrow keys + Enter) and hide the action bar.
  */
 async function sendPromptAction(keys) {
-  promptActionSentAt = Date.now();
+  promptActionSuppressedKey = lastPromptActionsKey;
   document.getElementById('prompt-actions').style.display = 'none';
   await sendRawKeys(keys);
 }
