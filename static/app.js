@@ -126,7 +126,7 @@ async function loadCapture() {
       }
       // Prompt detection
       const lines = data.content.split('\n');
-      const tail = lines.slice(-15);
+      const tail = lines.slice(-25);
       const detected = detectPrompt(tail);
       if (!detected) {
         promptActionSuppressedKey = '';   // options scrolled out of view — lift suppression
