@@ -202,13 +202,13 @@ def _check_pane_capture(target):
 def check_prompt_waiting(target):
     """Check if a pane is showing an interactive prompt awaiting user input.
 
-    Uses the content already captured by _check_pane_capture() (called from
-    get_pane_status) so this adds no extra tmux calls.
+    Captures the visible screen directly (no scrollback, lines joined) so the
+    result always reflects the current terminal state without relying on the
+    cached snapshot from _check_pane_capture().
     """
-    prev = _pane_capture_history.get(target)
-    if not prev:
+    code, content, _ = run_tmux("capture-pane", "-t", target, "-p", "-J")
+    if code != 0:
         return False
-    content = prev["content"]
     # Prompt footer signals (same patterns as the JS detectPrompt)
     if "Enter to select" in content:
         return True
