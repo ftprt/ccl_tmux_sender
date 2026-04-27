@@ -359,7 +359,7 @@ function detectPrompt(tailLines) {
   // Primary signal 1: AskUserQuestion / completion menu
   const hasSelectFooter = tailText.includes('Enter to select');
   // Primary signal 2: Plan completion prompt
-  const hasPlanFooter = tailText.includes('ctrl-g to edit') || tailText.includes('Would you like to proceed');
+  const hasPlanFooter = tailText.includes('ctrl-g to edit') || tailText.includes('Would you like to proceed') || tailText.includes('shift+tab to approve with this feedback');
   // Primary signal 3: Tool permission (Allow + Deny)
   const hasPermission = /\bAllow\b/i.test(tailText) && /\bDeny\b/i.test(tailText);
   // Primary signal 4: Bash command / tool execution confirmation

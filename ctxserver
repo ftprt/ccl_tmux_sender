@@ -212,7 +212,11 @@ def check_prompt_waiting(target):
     # Prompt footer signals (same patterns as the JS detectPrompt)
     if "Enter to select" in content:
         return True
-    if "ctrl-g to edit in VS Code" in content:
+    if "ctrl-g to edit" in content:
+        return True
+    if "Would you like to proceed" in content:
+        return True
+    if "shift+tab to approve with this feedback" in content:
         return True
     if "Esc to cancel" in content and "Tab to amend" in content:
         return True
