@@ -370,13 +370,13 @@ function detectPrompt(tailLines) {
   if (!hasSelectFooter && !hasPlanFooter && !hasPermission && !hasBashConfirm && !hasClaudeDialog) return null;
 
   // Regex for numbered option lines (with or without ❯ selector)
-  const optionRe = /^(\s*)(❯\s*)?\s*(\d+)\.\s+(.+)$/;
+  const optionRe = /^(\s*)([❯↓↑]\s*)?\s*(\d+)\.[─\s]+(.+)$/;
 
   // Find the anchor line: the line with ❯ + numbered option
   let anchorIdx = -1;
   for (let i = 0; i < tailLines.length; i++) {
     const m = tailLines[i].match(optionRe);
-    if (m && m[2]) { // m[2] is the ❯ group
+    if (m && m[2] && m[2].includes('❯')) { // m[2] is the ❯ selector
       anchorIdx = i;
       break;
     }
@@ -385,7 +385,7 @@ function detectPrompt(tailLines) {
 
   // Scan BACKWARD from anchor to find the top of the option block.
   // Walk through option lines, description lines (deeply indented),
-  // and blank lines. Stop at anything else (regular text, separators).
+  // blank lines, and visual separator lines. Stop at regular text.
   let blockStart = anchorIdx;
   for (let i = anchorIdx - 1; i >= 0; i--) {
     const line = tailLines[i];
@@ -393,10 +393,12 @@ function detectPrompt(tailLines) {
       blockStart = i;                  // another option line → extend block
     } else if (line.trim() === '') {
       continue;                        // blank line → keep scanning
+    } else if (/^[─━═\-]+$/.test(line.trim())) {
+      continue;                        // visual separator (─────) → keep scanning
     } else if (/^\s{3,}\S/.test(line)) {
       continue;                        // description line (deeply indented) → keep scanning
     } else {
-      break;                           // regular text / separator → block boundary
+      break;                           // regular text → block boundary
     }
   }
 
@@ -409,9 +411,9 @@ function detectPrompt(tailLines) {
   for (let i = blockStart; i <= blockEnd; i++) {
     const m = tailLines[i].match(optionRe);
     if (!m) continue;
-    const isSelected = !!m[2];
+    const isSelected = !!m[2] && m[2].includes('❯');
     const num = parseInt(m[3]);
-    const label = m[4].trim();
+    const label = m[4].trim().replace(/─+$/, '').trim();
     if (isSelected) selectedNum = num;
     options.push({ num, label, selected: isSelected, keys: [] });
   }
